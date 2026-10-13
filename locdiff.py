@@ -17,8 +17,9 @@ changed. With --apply it copies the old value of each such key into the new
     python locdiff.py old/Streets.loc new/Streets.loc --watch ComprehensiveZoneMatch
     python locdiff.py old/Streets.loc new/Streets.loc --apply
 
-Exit codes: 0 no watched key lost, 1 a watched key was dropped, changed or is
-ambiguous, 2 a file could not be read or written, 64 usage error.
+Exit codes: 0 no watched key lost, 1 a watched key was dropped, changed,
+ambiguous or (when named with --watch) set by neither file, 2 a file could not
+be read or written, 64 usage error.
 """
 
 from __future__ import print_function
@@ -57,7 +58,8 @@ DROPPED = "DROPPED"
 DROPPED_DEFAULT = "DROPPED-DEFAULT"
 CHANGED = "CHANGED"
 AMBIGUOUS = "AMBIGUOUS"
-FAILING = (DROPPED, CHANGED, AMBIGUOUS)
+UNKNOWN = "UNKNOWN"
+FAILING = (DROPPED, CHANGED, AMBIGUOUS, UNKNOWN)
 RESTORABLE = (DROPPED, CHANGED)
 
 
@@ -146,8 +148,13 @@ def _lines_of(entries):
     return ", ".join(str(e.line) for e in entries)
 
 
-def judge(key, old, new):
-    """Decide one watched key from its OLD and NEW entries."""
+def judge(key, old, new, named=False):
+    """Decide one watched key from its OLD and NEW entries.
+
+    A key neither file sets is ABSENT, and passes, for the built-in default
+    key. When the caller named the key with --watch it is UNKNOWN and fails:
+    a misspelled key (supportsOptionalZones) must not read as a clean diff.
+    """
     folded = key.lower()
     old_values, new_values = distinct(old), distinct(new)
     for side, entries, values in (("OLD", old, old_values),
@@ -158,6 +165,10 @@ def judge(key, old, new):
                            "reader uses is not documented."
                            % (side, _lines_of(entries), " and ".join(values)))
     if not old and not new:
+        if named:
+            return Finding(key, UNKNOWN, old, new,
+                           "set by neither file. Check the spelling: the "
+                           "name must match exactly, apart from case.")
         return Finding(key, ABSENT, old, new, "absent from both files")
     if not new:
         if DOCUMENTED_DEFAULTS.get(folded) == old_values[0]:
@@ -196,12 +207,14 @@ class Report(object):
         return any(f.verdict in FAILING for f in self.watched)
 
 
-def compare(old_entries, new_entries, watch=(DEFAULT_WATCH,), ignore=()):
+def compare(old_entries, new_entries, watch=(DEFAULT_WATCH,), ignore=(),
+            named=False):
     """Diff two parsed .loc files. Key case is folded throughout.
 
-    Esri's own files spell the same key two ways (supportsOptionalZone in one
-    sample, SupportsOptionalZone in a Pro build), so a case-sensitive diff
-    would report one renamed key as one drop plus one add.
+    Public .loc files spell the same key two ways (supportsOptionalZone in
+    Esri's sample, SupportsOptionalZone in a city's file), so a case-sensitive
+    diff would report one renamed key as one drop plus one add. named is True
+    when the caller picked the watch keys with --watch.
     """
     old, new = index(old_entries), index(new_entries)
     report = Report()
@@ -214,7 +227,7 @@ def compare(old_entries, new_entries, watch=(DEFAULT_WATCH,), ignore=()):
                                                           for k in ignore)
     for key in watched:
         report.watched.append(judge(key, old.get(key.lower(), []),
-                                    new.get(key.lower(), [])))
+                                    new.get(key.lower(), []), named))
     for folded in sorted(set(old) | set(new)):
         o, n = old.get(folded, []), new.get(folded, [])
         if o and n:
@@ -389,6 +402,30 @@ def self_test():
     check(verdict("A = 1\n", "A = 1\n") == ABSENT,
           "a key on neither side is ABSENT, not SAME")
     check(gate(diff("A = 1\n", "A = 1\n")) == 0, "and ABSENT passes")
+    check(gate(diff(old, "supportsOptionalZone = false\n")) == 1,
+          "a CHANGED key fails the gate  <-- pinned defect")
+    check(diff(old, old).watched[0].message == "true on both sides",
+          "and a SAME finding says the shared value")
+    rep = diff("A = 1\n", "A = 1\n", watch=["supportsOptionalZones"],
+               named=True)
+    check(rep.watched[0].verdict == UNKNOWN and gate(rep) == 1,
+          "a --watch key that neither file sets is UNKNOWN and fails"
+          "  <-- pinned defect")
+    check("Check the spelling" in rep.watched[0].message,
+          "and the finding says to check the spelling")
+    check(diff("A = 1\n", "A = 1\n", watch=[""], named=True)
+          .watched[0].verdict == UNKNOWN,
+          "an empty --watch key is UNKNOWN too  <-- pinned defect")
+    check(verdict("supportsOptionalZone = true\n", "",
+                  watch=["supportsOptionalZones"], named=True) == UNKNOWN,
+          "the plural spelling in Esri's bug text does not match the "
+          "singular key, and says so")
+    two = ["Category", "supportsOptionalZone"]
+    check(gate(diff(old, new, watch=two, named=True)) == 1,
+          "one lost key among two watched keys fails the gate"
+          "  <-- pinned defect")
+    check(gate(diff(old, old, watch=two, named=True)) == 0,
+          "and two watched keys that are both SAME pass")
 
     # ---- the spellings Esri files really use
     check(verdict("supportsOptionalZone = true\n",
@@ -406,6 +443,9 @@ def self_test():
           "the values True and TRUE are one boolean  <-- pinned defect")
     check(diff("Description = Streets\n", "Description = STREETS\n").differs
           != [], "but a non-boolean value is compared verbatim")
+    check(diff("S = FALSE\n", "S = false\n").differs == [],
+          "a boolean's case is folded for the other differences too"
+          "  <-- pinned defect")
     check(verdict("supportsOptionalZone = true\n",
                   "; supportsOptionalZone = true\n") == DROPPED,
           "a commented-out key counts as absent  <-- pinned defect")
@@ -422,6 +462,9 @@ def self_test():
           "an empty value is a live setting")
     check(parse_line("no equals here") is None, "a line with no = is skipped")
     check(parse_line("") is None, "a blank line is skipped")
+    check(parse_line(";key = value") is None
+          and parse_line("; key = value") is None,
+          "a comment is skipped with or without a space after the ;")
     check(parse_line("1st = x") is None and parse_line("a b = x") is None,
           "a key that is not a name is skipped")
     check([e.line for e in parse_loc("\n; c\nA = 1\n\nB = 2")] == [3, 5],
@@ -438,6 +481,8 @@ def self_test():
           "  <-- pinned defect")
     check(diff(multi_old, multi_old).differs == [],
           "and the same repeated lines compare equal")
+    check(len(diff("B = 2\nB = 1\n", "B = 1\nB = 2\n").differs) == 1,
+          "and the same lines in another order are a difference")
     check(verdict("supportsOptionalZone = true\nsupportsOptionalZone = false\n",
                   "supportsOptionalZone = true\n") == AMBIGUOUS,
           "a watched key set twice with two values in OLD is AMBIGUOUS"
@@ -469,6 +514,8 @@ def self_test():
           "a value that changed is listed as differs")
     check(gate(rep) == 0,
           "other differences are reported but never fail the gate")
+    check("other differences: 3" in "\n".join(describe(rep)),
+          "the count adds the only-OLD, only-NEW and differs parts")
     rep = diff(stamp_old, stamp_new, ignore=["minimummatchscore"])
     check(rep.differs == [] and "MinimumMatchScore" in rep.ignored,
           "--ignore adds a key, in any case")
@@ -502,7 +549,8 @@ def self_test():
           "the report lists each other difference")
     check("caf\\xe9" in text, "a non-ASCII value prints as an escape, never "
           "crashes a cp1252 console  <-- pinned defect")
-    check("ignored (build stamps and --ignore): RebuildStartTime" in text,
+    check("ignored (build stamps and --ignore): RebuildStartTime, "
+          "RebuildStartTimeAscii" in text,
           "the report names the keys it ignored")
     check("VERDICT: no watched key was lost." in text,
           "a clean diff says so")
@@ -553,6 +601,9 @@ def self_test():
           == "; supportsOptionalZone = false\nsupportsOptionalZone = true\n",
           "a commented line is left alone and the key is appended")
     check(apply_edits("A = 1\n", []) == "A = 1\n", "no edit changes nothing")
+    check(apply_edits("A = 1\nsupportsOptionalZone = false", edits)
+          == "A = 1\nsupportsOptionalZone = true",
+          "a rewrite keeps a file's missing final newline missing")
     restored = apply_edits(new, plan_edits(diff(old, new)))
     check(gate(diff(old, restored)) == 0,
           "after the restore the diff passes")
@@ -567,14 +618,18 @@ def self_test():
     # With abbreviations on, --ap parses as --apply and writes NEW.
     for prefix in ("--ap", "--appl", "--wat", "--self"):
         err = io.StringIO()
+        status = []
         with contextlib.redirect_stderr(err):
             try:
                 _parse(["a", "b", prefix])
-            except SystemExit:
-                pass
-        check("unrecognized arguments: %s" % prefix in err.getvalue(),
-              "the prefix %s is refused, not expanded  <-- pinned defect"
-              % prefix)
+            except SystemExit as stop:
+                status.append(stop.code)
+        check("unrecognized arguments: %s" % prefix in err.getvalue()
+              and status == [64],
+              "the prefix %s is refused with exit 64, not expanded"
+              "  <-- pinned defect" % prefix)
+    check(_parse(["a", "--watch", "K", "b"]).new == "b",
+          "a file may follow a flag, on any Python  <-- pinned defect")
 
     # ---- the CLI, on real temp files
     tmp = tempfile.mkdtemp(prefix="locdiff-")
@@ -595,13 +650,33 @@ def self_test():
     def run(argv):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = main(argv)
+            try:
+                code = main(argv)
+            except SystemExit as stop:  # a usage error leaves via exit(64)
+                code = stop.code
         return code, out.getvalue(), err.getvalue()
 
     put(old_path, old_bytes)
     put(new_path, new_bytes)
     code, out, _ = run([old_path, new_path])
     check(code == 1, "the CLI exits 1 on the dropped key  <-- pinned defect")
+    code, out2, _ = run([old_path, new_path, "--watch", "Category",
+                         "--watch", "supportsOptionalZone"])
+    check(code == 1 and "DROPPED          supportsOptionalZone" in out2
+          and "SAME             Category" in out2,
+          "the CLI fails on one lost key among two --watch keys"
+          "  <-- pinned defect")
+    code, out2, _ = run([old_path, new_path, "--watch",
+                         "supportsOptionalZones"])
+    check(code == 1 and "UNKNOWN" in out2 and "no watched key was lost" not in out2,
+          "the CLI fails on a misspelled --watch key  <-- pinned defect")
+    code, _, err = run([old_path, new_path, "--bogus"])
+    check(code == 64 and "unrecognized arguments" in err,
+          "an unknown flag exits 64, not the 2 of a file error"
+          "  <-- pinned defect")
+    code, out2, _ = run([old_path, "--watch", "Category", new_path])
+    check(code == 0 and "SAME             Category" in out2,
+          "a file may follow --watch on the command line")
     check("DROPPED          supportsOptionalZone" in out,
           "and prints the finding")
     check("Check only. NEW was not written" in out,
@@ -660,10 +735,33 @@ def self_test():
     code, _, err = run([old_path, os.path.join(tmp, "absent.loc")])
     check(code == 2 and "error:" in err, "a missing file exits 2")
     loz = os.path.join(tmp, "Streets.loz")
-    put(loz, b"PK\x03\x04\x00\x00binary")
-    code, _, err = run([old_path, loz])
+    loz_bytes = b"PK\x03\x04\x14\x00a = b\r\nsupportsOptionalZone = true\n"
+    put(loz, loz_bytes)
+    code, _, err = run([old_path, loz, "--apply"])
+    check(code == 2 and "is binary" in err and get(loz) == loz_bytes
+          and not os.path.exists(loz + ".bak.1"),
+          "a zip with key = value bytes inside, such as a .loz, exits 2 and "
+          "is never written  <-- pinned defect")
+    utf16 = os.path.join(tmp, "utf16.loc")
+    put(utf16, b"\xff\xfe" + "A = 1\n".encode("utf-16-le"))
+    code, _, err = run([old_path, utf16])
+    check(code == 2 and "UTF-16" in err,
+          "a UTF-16 .loc exits 2 and names the encoding  <-- pinned defect")
+    text_only = os.path.join(tmp, "notes.txt")
+    put(text_only, b"no setting in this file\n")
+    code, _, err = run([old_path, text_only])
     check(code == 2 and "no key = value line" in err,
-          "a file with no setting in it, such as a .loz, exits 2"
+          "a text file with no setting in it exits 2")
+    ghost = os.path.join(tmp, "caf" + chr(0xE9) + ".loc")
+    code, _, err = run([old_path, ghost])
+    check(code == 2 and "caf\\xe9" in err,
+          "an error message escapes a non-ASCII path, so a cp1252 console "
+          "cannot crash on it  <-- pinned defect")
+    hard = os.path.join(tmp, "hard.loc")
+    os.link(old_path, hard)
+    code, _, err = run([old_path, hard])
+    check(code == 64 and "same file" in err,
+          "a hard link to OLD is the same file, never a pass"
           "  <-- pinned defect")
 
     latin = os.path.join(tmp, "latin.loc")
@@ -689,6 +787,31 @@ def self_test():
           "a write that fails exits 2, not the 1 a lost key exits")
     check(get(new_path) == new_bytes,
           "and NEW is left as it was  <-- pinned defect")
+    os.rmdir(new_path + ".locdiff-tmp")
+    target = os.path.join(tmp, "dir.loc")
+    os.mkdir(target)
+    raises_os = False
+    try:
+        write_loc(target, b"x", "x", "utf-8")
+    except OSError:
+        raises_os = True
+    check(raises_os and not os.path.exists(target + ".locdiff-tmp")
+          and not os.path.exists(target + ".bak.1"),
+          "a rename that fails leaves no temp file and no backup behind"
+          "  <-- pinned defect")
+    multi_old = os.path.join(tmp, "multi_old.loc")
+    multi_new = os.path.join(tmp, "multi_new.loc")
+    put(multi_old, b"supportsOptionalZone = true\nComprehensiveZoneMatch = "
+        b"true\nX = 1\n")
+    put(multi_new, b"supportsOptionalZone = false\nX = 1\n")
+    code, out, _ = run([multi_old, multi_new, "--apply", "--watch",
+                        "supportsOptionalZone", "--watch",
+                        "ComprehensiveZoneMatch"])
+    check(code == 0 and get(multi_new) == b"supportsOptionalZone = true\n"
+          b"X = 1\nComprehensiveZoneMatch = true\n",
+          "--apply restores every lost key, not only the first"
+          "  <-- pinned defect")
+    check(out.count("SAME") == 2, "and the re-check lists both as SAME")
 
     code, out, _ = run([old_path, new_path, "--watch", "Category"])
     check(code == 0 and "SAME             Category" in out
@@ -712,8 +835,13 @@ def self_test():
                                                   os.path.abspath(__file__))
     probe_module = importlib.util.module_from_spec(spec)
     out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        spec.loader.exec_module(probe_module)
+    keep_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True  # the probe must not leave a __pycache__
+    try:
+        with contextlib.redirect_stdout(out):
+            spec.loader.exec_module(probe_module)
+    finally:
+        sys.dont_write_bytecode = keep_bytecode
     check(out.getvalue() == "" and probe_module.DEFAULT_WATCH == DEFAULT_WATCH,
           "importing the module runs nothing")
 
@@ -756,10 +884,16 @@ def read_loc(path):
     """(bytes, text, entries, codec). UTF-8 when it decodes, else Latin-1.
 
     Both decodings round-trip exactly, so a write changes only the lines it
-    sets. Raises ValueError for a file with no setting in it.
+    sets. Raises ValueError for a binary file (a .loz zip, a UTF-16 text) and
+    for a file with no setting in it. A text .loc holds no NUL byte.
     """
     with open(path, "rb") as handle:
         raw = handle.read()
+    if b"\x00" in raw or raw.startswith(b"PK\x03\x04"):
+        raise ValueError("%s is binary (a NUL byte, or a zip such as a .loz), "
+                         "so it is not a text .loc file. Pass the .loc beside "
+                         "the .loz. Save a UTF-16 .loc as UTF-8 or ANSI."
+                         % path)
     try:
         text, codec = raw.decode("utf-8"), "utf-8"
     except UnicodeDecodeError:
@@ -793,14 +927,30 @@ def write_loc(path, raw, text, codec):
         except FileExistsError:
             number += 1
     temp = path + ".locdiff-tmp"
-    with open(temp, "wb") as handle:
-        handle.write(data)
-    os.replace(temp, path)
+    try:
+        with open(temp, "wb") as handle:
+            handle.write(data)
+        os.replace(temp, path)
+    except OSError:
+        # NEW is unchanged, so its backup is a duplicate. Leave nothing to
+        # pile up on a retry.
+        for stray in (temp, backup):
+            with contextlib.suppress(OSError):
+                os.remove(stray)
+        raise
     return backup
 
 
+class _Parser(argparse.ArgumentParser):
+    """A usage error exits 64, as the docs say, not argparse's 2 (a file error)."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(64, "%s: error: %s\n" % (self.prog, message))
+
+
 def _parse(argv):
-    ap = argparse.ArgumentParser(
+    ap = _Parser(
         prog="locdiff.py",
         description="Diff two ArcGIS locator .loc files and fail when a "
                     "watched setting was dropped or changed.",
@@ -822,7 +972,16 @@ def _parse(argv):
                          "key into NEW, after a backup")
     ap.add_argument("--self-test", dest="self_test", action="store_true",
                     help="run the offline assertions and exit")
-    return ap.parse_args(argv)
+    # Intermixed, so OLD --watch K NEW parses the same on Python 3.9 and 3.13.
+    return ap.parse_intermixed_args(argv)
+
+
+def same_file(a, b):
+    """True when both paths reach one file: symlinks and hard links included."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False  # a missing file: read_loc reports it with exit 2
 
 
 def main(argv=None):
@@ -834,8 +993,7 @@ def main(argv=None):
               "--self-test to check the tool without them.", file=sys.stderr)
         return 64
     old_path, new_path = locate(args.old), locate(args.new)
-    if (os.path.normcase(os.path.realpath(old_path))
-            == os.path.normcase(os.path.realpath(new_path))):
+    if same_file(old_path, new_path):
         print("error: OLD and NEW are the same file, so the diff could only "
               "pass.", file=sys.stderr)
         return 64
@@ -843,11 +1001,12 @@ def main(argv=None):
         old = read_loc(old_path)
         new = read_loc(new_path)
     except (IOError, OSError, ValueError) as exc:
-        print("error: %s" % exc, file=sys.stderr)
+        print("error: %s" % show(str(exc)), file=sys.stderr)
         return 2
 
     watch = args.watch or [DEFAULT_WATCH]
-    report = compare(old[2], new[2], watch, args.ignore)
+    named = bool(args.watch)
+    report = compare(old[2], new[2], watch, args.ignore, named)
     print("locdiff: OLD %s (%d settings), NEW %s (%d settings)"
           % (show(old_path), len(old[2]), show(new_path), len(new[2])))
     for line in describe(report):
@@ -857,7 +1016,7 @@ def main(argv=None):
         edits = plan_edits(report)
     except ValueError as exc:
         if args.apply:
-            print("error: %s" % exc, file=sys.stderr)
+            print("error: %s" % show(str(exc)), file=sys.stderr)
         return gate(report)
     if not args.apply:
         if edits:
@@ -871,19 +1030,22 @@ def main(argv=None):
         backup = write_loc(new_path, new[0], apply_edits(new[1], edits),
                            new[3])
     except ValueError as exc:
-        print("error: %s" % exc, file=sys.stderr)
+        print("error: %s" % show(str(exc)), file=sys.stderr)
         return 2
     except (IOError, OSError) as exc:
-        print("error: could not write %s: %s" % (show(new_path), exc),
+        print("error: could not write %s: %s" % (show(new_path),
+                                                 show(str(exc))),
               file=sys.stderr)
         return 2
     print("\nwrote %s (backup %s): %s"
           % (show(new_path), show(backup),
              ", ".join("%s = %s" % (show(k), show(v)) for k, v in edits)))
-    after = compare(old[2], read_loc(new_path)[2], watch, args.ignore)
+    after = compare(old[2], read_loc(new_path)[2], watch, args.ignore, named)
     print("re-check:")
     for f in after.watched:
         print("  %-16s %s  %s" % (f.verdict, show(f.key), show(f.message)))
+    # ponytail: no input makes this re-check fail, because apply_edits sets
+    # the exact value plan_edits read; the gate stays as a guard on that.
     return gate(after)
 
 

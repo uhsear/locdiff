@@ -35,6 +35,8 @@ PASS  false to true is CHANGED too: the gate does not pick a direction
 PASS  dropping false, the documented default, is DROPPED-DEFAULT
 PASS  and does not fail the gate, because nothing changes
 ...
+PASS  a --watch key that neither file sets is UNKNOWN and fails  <-- pinned defect
+...
 PASS  a case-only respelling is the same key, not a drop  <-- pinned defect
 PASS  and the respelling is reported
 PASS  and it is not also listed as only OLD and only NEW  <-- pinned defect
@@ -42,9 +44,10 @@ PASS  the values True and TRUE are one boolean  <-- pinned defect
 ...
 PASS  a repeated key keeps every line, so losing one of two is seen  <-- pinned defect
 PASS  and the same repeated lines compare equal
+...
 PASS  a watched key set twice with two values in OLD is AMBIGUOUS  <-- pinned defect
 ...
-PASS  the prefix --ap is refused, not expanded  <-- pinned defect
+PASS  the prefix --ap is refused with exit 64, not expanded  <-- pinned defect
 ...
 PASS  and both files are byte for byte unchanged  <-- pinned defect
 PASS  and no backup or other file was created
@@ -53,13 +56,21 @@ PASS  the NEW file gains exactly the one line, in CRLF
 PASS  the backup holds NEW as it was  <-- pinned defect
 PASS  the OLD file is never written
 ...
+PASS  a zip with key = value bytes inside, such as a .loz, exits 2 and is never written  <-- pinned defect
+...
+PASS  a hard link to OLD is the same file, never a pass  <-- pinned defect
+...
+PASS  a rename that fails leaves no temp file and no backup behind  <-- pinned defect
+PASS  --apply restores every lost key, not only the first  <-- pinned defect
+...
 PASS  importing the module runs nothing
 PASS  check() and raises() really do record a failure  <-- pinned defect
+...
 --------------------------------------------------------------------
-110 assertions, 0 failed
+135 assertions, 0 failed
 ```
 
-The full run prints all 110 assertions. The `...` lines show where this block is cut.
+The full run prints all 135 assertions. The `...` lines show where this block is cut.
 
 ## The existing alternatives
 
@@ -70,9 +81,8 @@ shows `FALSE` against `false` as a change. It shows `supportsOptionalZone` again
 `SupportsOptionalZone` as one line removed and one line added. It has no idea which lines change
 matching, and it cannot fail a scheduled job on one key.
 
-**The Locator Properties dialog in ArcGIS Pro** is the authoritative view of one locator. Under
-Geocoding options it shows "Match with no zones" as Yes or No. It shows one locator at a time,
-though, and it compares nothing.
+**The Locator Properties dialog in ArcGIS Pro** is the authoritative view of one locator. It
+shows one locator at a time, though, and it compares nothing.
 
 A search of GitHub (`gh search repos locdiff`, `"locator diff"` and `supportsOptionalZone`, on
 2026-10-09) found no tool that diffs two `.loc` files. Two unrelated projects share the name: an
@@ -92,7 +102,7 @@ Each behaviour this tool relies on, and where it comes from:
   the locator, this property will be set to true when the locator is built." That default is why
   a dropped `false` is `DROPPED-DEFAULT` and passes, and a dropped `true` fails.
 - **Esri's advice against it.** The ArcGIS Pro help topic
-  [Tips for improving geocoding quality](https://pro.arcgis.com/en/pro-app/latest/help/data/geocoding/tips-for-improving-geocoding-quality.htm)
+  [Tips for improving geocoding quality](https://doc.esri.com/en/arcgis-pro/latest/help/data/geocoding/tips-for-improving-geocoding-quality.html)
   calls "Match with no zones" "a legacy setting for locators that were built without
   administrative zones". It recommends that you do not build locators without administrative
   zones, because it "can result in poor geocoding quality when matching addresses that have the
@@ -105,19 +115,21 @@ Each behaviour this tool relies on, and where it comes from:
   row, `RebuildStartTime` and `RebuildStartTimeAscii` build stamps, and a
   `LocatorWorkspaceString` value that itself holds `=`. That sample spells the key
   `supportsOptionalZone`.
-- **Two spellings.** A public locator built with ArcGIS Pro
+- **Two spellings.** A public city locator
   ([CityofSyracuse/Syracuse-GeocodingLocators](https://github.com/CityofSyracuse/Syracuse-GeocodingLocators/blob/main/SyrStreets.loc))
-  spells the same key `SupportsOptionalZone`, writes disabled settings as `; CategoriesFilter =`,
-  and writes booleans as both `FALSE` and `true`. Esri does not document whether the reader folds
-  key case. Because Esri's own files use both spellings, this tool treats them as one key and
-  prints the respelling, so that a human can check it.
+  spells the same key `SupportsOptionalZone`, with a capital S, writes disabled settings as
+  `; CategoriesFilter =`, and writes booleans as both `FALSE` and `true`. Esri's sample spells it
+  `supportsOptionalZone`. Esri does not document whether the reader folds key case. Because public
+  files use both spellings, this tool treats them as one key and prints the respelling, so that a
+  human can check it. Esri's bug text writes `supportsOptionalZones` with an s. That is a
+  different name, which this tool does not match.
 
 ## Requirements
 
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 credentials. A `.loc` file is plain text, so any machine that can see the files can run it.
 
-The self-test prints 110 assertions on each interpreter it was run on: Windows Python 3.13.2,
+The self-test prints 135 assertions on each interpreter it was run on: Windows Python 3.13.2,
 Ubuntu Python 3.12.3, and CPython 3.9.25 on both hosts. The output was identical line for line
 on Windows 3.13 and Ubuntu 3.12.
 
@@ -143,17 +155,20 @@ python locdiff.py old/Streets.loc new/Streets.loc --apply
 |---|---|---|
 | `OLD` | none | The `.loc` of the build that worked. Never written. |
 | `NEW` | none | The `.loc` of the rebuild. Written only with `--apply`. |
-| `--watch KEY` | `supportsOptionalZone` | A key whose loss fails the run. Repeat it. Given at all, it replaces the default, so name `supportsOptionalZone` again to keep it. |
+| `--watch KEY` | `supportsOptionalZone` | A key whose loss fails the run. Repeat it. Given at all, it replaces the default, so name `supportsOptionalZone` again to keep it. A key that neither file sets is `UNKNOWN` and fails, so a misspelling cannot pass. |
 | `--ignore KEY` | none | A key to leave out of the other differences, on top of the two build stamps. Repeat it. |
 | `--apply` | off | Copy OLD's value of each dropped or changed watched key into NEW, after a backup. |
 | `--self-test` | off | Run the assertions and exit. |
 
-Every flag must be spelled in full. `--ap` is refused, not read as `--apply`.
+Every flag must be spelled in full. `--ap` is refused with exit 64, not read as `--apply`. A file
+may come before or after a flag, on Python 3.9 as on 3.13.
 
 ## What it reports
 
-These runs use two synthetic `.loc` files. The rebuild dropped two settings, and it wrote one
-boolean in a different case.
+These runs use synthetic `.loc` files, `old/Streets.loc` and `new/Streets.loc`. The repo ships no
+fixtures, so you cannot rerun these exact outputs from it. The self-test builds its own files and
+covers the same behaviours. The rebuild dropped two settings, and it wrote one boolean in a
+different case.
 
 ```
 $ python locdiff.py old/Streets.loc new/Streets.loc
@@ -178,12 +193,29 @@ Each watched key gets one verdict:
 | Verdict | Meaning | Fails |
 |---|---|---|
 | `SAME` | One value on both sides. | no |
-| `ABSENT` | Neither file sets it. | no |
+| `ABSENT` | Neither file sets the default key. With `--watch`, this is `UNKNOWN`. | no |
 | `ADDED` | Only NEW sets it. | no |
 | `DROPPED-DEFAULT` | Only OLD sets it, to the value Esri documents as the default. Nothing changes. | no |
 | `DROPPED` | Only OLD sets it. | yes |
 | `CHANGED` | Both set it, to different values. Either direction fails: the tool does not pick one. | yes |
 | `AMBIGUOUS` | One file sets it on two lines with two values. Which line wins is not documented. | yes |
+| `UNKNOWN` | Named with `--watch`, and neither file sets it. Often a misspelling. | yes |
+
+A misspelled key fails, and the report points at the likely cause:
+
+```
+$ python locdiff.py old/Streets.loc new/Streets.loc --watch supportsOptionalZones
+locdiff: OLD old/Streets.loc (3 settings), NEW new/Streets.loc (2 settings)
+watched keys:
+  UNKNOWN          supportsOptionalZones  set by neither file. Check the spelling: the name must match exactly, apart from case.
+other differences: 1
+  only OLD  supportsOptionalZone = true
+ignored (build stamps and --ignore): RebuildStartTime
+
+VERDICT: supportsOptionalZones lost or unclear in NEW. Searches that relied on a lost setting may stop matching.
+```
+
+The exit code is 1. This run used a three-line synthetic file, not the 11-setting one above.
 
 Only `supportsOptionalZone` has a documented default. Another watched key dropped at `false` is
 `DROPPED`, because the tool cannot know what absent means for it.
@@ -225,7 +257,8 @@ The exit code is the re-check's, here 0. What the write does, and what it does n
 - It changes only the lines it sets. A line NEW already has is rewritten in place, in NEW's
   spelling and line ending. A missing key is appended, in the file's own line ending, CRLF or LF.
   Every other byte is kept, including a UTF-8 BOM and a file that is not UTF-8.
-- It writes a temporary file beside NEW, then renames it over NEW.
+- It writes a temporary file beside NEW, then renames it over NEW. If either step fails, it
+  removes the temporary file and the backup, so a retry leaves nothing behind.
 - It never writes OLD.
 - It refuses the whole write when a watched key is `AMBIGUOUS`, because there is no one value to
   restore. The exit code is 1 and nothing is written.
@@ -243,17 +276,19 @@ reads a copy of the locator instead of the file you changed, the copy keeps the 
 | Code | Meaning |
 |---|---|
 | 0 | No watched key was lost. After `--apply`, the re-check passed. |
-| 1 | A watched key was dropped, changed or is ambiguous. |
-| 2 | A file could not be read or written, or it holds no `key = value` line. |
-| 64 | Usage error: one file, or the same file given as both OLD and NEW. |
+| 1 | A watched key was dropped, changed, ambiguous, or named with `--watch` and set by neither file. |
+| 2 | A file could not be read or written, it is binary, or it holds no `key = value` line. |
+| 64 | Usage error: an unknown flag, one file, or one file given as both OLD and NEW. |
 
-A `.loz` file holds no `key = value` line, so passing it exits 2 and names the `.loc` to pass
-instead. The same file given twice exits 64, because that diff could only pass.
+A binary file exits 2 and names the `.loc` to pass instead. That covers a `.loz` (a zip) and a
+UTF-16 text file, because both hold NUL bytes or start with the zip signature. A `.loz` is never
+written, even with `--apply`. The same file given twice exits 64, because that diff could only
+pass. Two names for one file, such as a symlink or a hard link, count as the same file.
 
 ## Limits
 
-- It reads the `.loc` text file only. It does not open the `.loz` or the `.loc.xml`, and it does
-  not query a geocode service, so it opens no socket.
+- It reads the `.loc` text file only. It refuses the `.loz` and does not open the `.loc.xml`. It
+  does not query a geocode service, so it opens no socket.
 - It reads settings, not results. It cannot tell you that an address stopped matching. It tells
   you that a setting which controls matching is different. Geocode a set of addresses with no
   city through both builds to see the effect.
@@ -267,6 +302,29 @@ instead. The same file given twice exits 64, because that diff could only pass.
   change. It does not prove that a change breaks your searches.
 - A file that is not valid UTF-8 is read as Latin-1, so a non-ASCII value prints as an escape.
   The bytes on disk are kept exactly.
+- A file with a UTF-8 BOM and also one byte that is not valid UTF-8 is read as Latin-1, and the
+  BOM then spoils its first line. A watched key on that line reads as absent. Keep the two apart.
+- A UTF-16 file exits 2 as binary. Save a `.loc` as UTF-8 or ANSI.
+- Line endings must be LF or CRLF. A file with only CR line endings is read as one line, so its
+  settings are not seen.
+- The default key, when neither file sets it, is `ABSENT` and passes. A pair of files that never
+  had the setting, or the wrong pair, reads as clean. Read the `ABSENT` line. A key named with
+  `--watch` does not behave this way: it is `UNKNOWN` and fails.
+- The tool cannot tell which file is older. If you swap OLD and NEW, a dropped setting reads as
+  `ADDED` and the run passes.
+- It matches the key name exactly, apart from case. Esri's bug text writes `supportsOptionalZones`
+  with an s. A file that uses that name needs `--watch supportsOptionalZones`.
+- Only `RebuildStartTime` and `RebuildStartTimeAscii` are build stamps. Another key a rebuild
+  rewrites, such as `BuildDate`, can appear under other differences. Add it with `--ignore`.
+- A value is printed as written, with no redaction. If a `.loc` holds a connection string with a
+  password, the report and any log of it show the password. Do not publish that output.
+- NEW is read once. If it changes between the read and the `--apply` write, for example while a
+  rebuild still runs, the write replaces that change.
+- `--apply` replaces the file, so check its permissions and owner afterwards. Its mode bits, owner
+  and Windows ACLs are not kept, and links to it are not followed: a symlink at NEW becomes a
+  regular file.
+- The re-check after `--apply` cannot fail on any input, because the write sets the exact value
+  the plan read. It stays in the code as a guard.
 
 ## Contributing
 
